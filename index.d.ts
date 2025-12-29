@@ -6,7 +6,7 @@
  *
  * @packageDocumentation
  * @module plurima
- * @version 0.1.0
+ * @version 0.2.0
  *
  * @example Plugin básico
  * ```ts
@@ -889,6 +889,94 @@ export interface PaletteProvider {
 }
 
 // ============================================
+// DATABASE API
+// ============================================
+
+/**
+ * API para acesso ao banco de dados SQLite do workspace.
+ *
+ * Permite executar queries SQL no banco de dados do workspace atual.
+ * Use com cuidado - queries incorretas podem corromper dados.
+ *
+ * @since 0.2.0
+ *
+ * @example Query simples
+ * ```ts
+ * const notes = await this.database.query<{ id: string; path: string }>(
+ *   "SELECT id, path FROM vfiles WHERE extension = ?",
+ *   [".md"]
+ * );
+ * ```
+ *
+ * @example Insert/Update
+ * ```ts
+ * const result = await this.database.run(
+ *   "INSERT INTO my_table (name, value) VALUES (?, ?)",
+ *   ["key", "value"]
+ * );
+ * console.log(`Inserted with ID: ${result.lastInsertRowid}`);
+ * ```
+ */
+export interface PluginDatabaseAPI {
+  /**
+   * Executa uma query SELECT e retorna todas as linhas.
+   * @since 0.2.0
+   * @typeParam T - Tipo das linhas retornadas
+   * @param sql - Query SQL
+   * @param params - Parâmetros para placeholders (?)
+   * @returns Array de resultados
+   * @throws Error se a query falhar
+   *
+   * @example
+   * ```ts
+   * const files = await this.database.query<{ id: string; name: string }>(
+   *   "SELECT id, name FROM vfiles WHERE mimeType = ?",
+   *   ["application/json"]
+   * );
+   * ```
+   */
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+
+  /**
+   * Executa uma query SELECT e retorna apenas a primeira linha.
+   * @since 0.2.0
+   * @typeParam T - Tipo da linha retornada
+   * @param sql - Query SQL
+   * @param params - Parâmetros para placeholders (?)
+   * @returns Primeira linha ou null se não houver resultados
+   * @throws Error se a query falhar
+   *
+   * @example
+   * ```ts
+   * const file = await this.database.get<{ id: string; name: string }>(
+   *   "SELECT id, name FROM vfiles WHERE path = ?",
+   *   ["/notes/example.md"]
+   * );
+   * ```
+   */
+  get<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null>;
+
+  /**
+   * Executa uma query INSERT, UPDATE ou DELETE.
+   * @since 0.2.0
+   * @param sql - Query SQL
+   * @param params - Parâmetros para placeholders (?)
+   * @returns Objeto com número de linhas afetadas e último ID inserido
+   * @throws Error se a query falhar
+   *
+   * @example
+   * ```ts
+   * const result = await this.database.run(
+   *   "UPDATE my_table SET value = ? WHERE key = ?",
+   *   ["new-value", "my-key"]
+   * );
+   * console.log(`Updated ${result.changes} rows`);
+   * ```
+   */
+  run(sql: string, params?: unknown[]): Promise<{ changes: number; lastInsertRowid?: number }>;
+}
+
+// ============================================
 // PLUGIN API
 // ============================================
 
@@ -930,6 +1018,12 @@ export interface PluginAPI {
    * @since 0.1.0
    */
   readonly settings: PluginSettingsAPI;
+
+  /**
+   * API para acesso ao banco de dados SQLite do workspace.
+   * @since 0.2.0
+   */
+  readonly database: PluginDatabaseAPI;
 
   /**
    * Adiciona um tema ao Plurima.
@@ -1212,6 +1306,12 @@ export declare abstract class Plugin {
    * @since 0.1.0
    */
   protected get settings(): PluginSettingsAPI;
+
+  /**
+   * API para acesso ao banco de dados SQLite do workspace.
+   * @since 0.2.0
+   */
+  protected get database(): PluginDatabaseAPI;
 
   /**
    * Chamado quando o plugin é ativado.
