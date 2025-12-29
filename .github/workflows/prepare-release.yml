@@ -1,0 +1,197 @@
+name: Prepare Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  analyze-and-release:
+    name: Analyze Commits & Create Draft Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Analyze commits and determine version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Busca a última release publicada (não-draft, não-prerelease)
+          LATEST_RELEASE=$(gh release list --limit 10 --json tagName,isDraft,isPrerelease \
+            --jq '[.[] | select(.isDraft == false and .isPrerelease == false)] | .[0].tagName // empty' \
+            | sed 's/^v//')
+
+          if [ -z "$LATEST_RELEASE" ]; then
+            # Nenhuma release existe, usa versão do package.json
+            CURRENT_VERSION=$(node -p "require('./package.json').version")
+            echo "No previous release found. Starting from version: $CURRENT_VERSION"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "new_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            echo "bump_type=initial" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Latest release: v$LATEST_RELEASE"
+
+          # Busca commits desde a última release
+          if git rev-parse "v$LATEST_RELEASE" >/dev/null 2>&1; then
+            COMMITS=$(git log "v$LATEST_RELEASE"..HEAD --pretty=format:"%s")
+          else
+            # Tag não existe localmente, analisa últimos 50 commits
+            COMMITS=$(git log -50 --pretty=format:"%s")
+          fi
+
+          # Filtra commits de release automática
+          COMMITS=$(echo "$COMMITS" | grep -v "^chore(release):" || true)
+
+          if [ -z "$COMMITS" ]; then
+            echo "No new commits since last release"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Commits to analyze:"
+          echo "$COMMITS"
+
+          # Determina o tipo de bump baseado nos commits (Conventional Commits)
+          BUMP_TYPE="none"
+
+          if echo "$COMMITS" | grep -qiE "^.*!:|BREAKING CHANGE"; then
+            BUMP_TYPE="major"
+          elif echo "$COMMITS" | grep -qiE "^feat(\(.*\))?:"; then
+            BUMP_TYPE="minor"
+          elif echo "$COMMITS" | grep -qiE "^fix(\(.*\))?:|^perf(\(.*\))?:|^refactor(\(.*\))?:|^docs(\(.*\))?:"; then
+            BUMP_TYPE="patch"
+          fi
+
+          if [ "$BUMP_TYPE" = "none" ]; then
+            echo "No conventional commits found that trigger a release"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Bump type: $BUMP_TYPE"
+
+          # Calcula próxima versão
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_RELEASE"
+
+          case $BUMP_TYPE in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "New version: $NEW_VERSION"
+
+          echo "should_release=true" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+
+      - name: Check if draft already exists
+        if: steps.version.outputs.should_release == 'true'
+        id: check_draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.new_version }}"
+
+          # Verifica se já existe uma release (draft ou não) com esta versão
+          EXISTING=$(gh release list --json tagName,isDraft \
+            --jq ".[] | select(.tagName == \"v$VERSION\") | .tagName" || echo "")
+
+          if [ -n "$EXISTING" ]; then
+            echo "Release v$VERSION already exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate changelog
+        if: steps.version.outputs.should_release == 'true' && steps.check_draft.outputs.exists != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.new_version }}"
+
+          # Lista commits recentes (excluindo chore(release))
+          COMMITS=$(git log -20 --pretty=format:"- %s" --no-merges | grep -v "^- chore(release):" | head -15)
+
+          cat > release_notes.md << EOF
+          ## Changes
+
+          $COMMITS
+
+          ## Installation
+
+          \`\`\`bash
+          npm install plurima@$VERSION
+          \`\`\`
+          EOF
+
+          cat release_notes.md
+
+      - name: Update package.json version
+        if: steps.version.outputs.should_release == 'true' && steps.check_draft.outputs.exists != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.new_version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          echo "Updated package.json to version $VERSION"
+
+      - name: Commit version bump
+        if: steps.version.outputs.should_release == 'true' && steps.check_draft.outputs.exists != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.new_version }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add package.json
+          git commit -m "chore(release): v$VERSION"
+          git tag "v$VERSION"
+          git push origin main --tags
+
+      - name: Create Draft Release
+        if: steps.version.outputs.should_release == 'true' && steps.check_draft.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.new_version }}"
+
+          gh release create "v$VERSION" \
+            --title "Plurima SDK v$VERSION" \
+            --notes-file release_notes.md \
+            --draft \
+            index.d.ts \
+            package.json
+
+      - name: Summary
+        if: steps.version.outputs.should_release == 'true' && steps.check_draft.outputs.exists != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.new_version }}"
+          echo "## 🚀 Draft Release Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Version: **v$VERSION**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To publish to npm, go to Releases and publish the draft." >> $GITHUB_STEP_SUMMARY

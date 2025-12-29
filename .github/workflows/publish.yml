@@ -1,0 +1,85 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Get version from tag
+        id: version
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing version: $VERSION"
+
+      - name: Validate package
+        run: |
+          echo "Validating package structure..."
+
+          if [ ! -f "index.d.ts" ]; then
+            echo "❌ index.d.ts not found"
+            exit 1
+          fi
+
+          if [ ! -f "package.json" ]; then
+            echo "❌ package.json not found"
+            exit 1
+          fi
+
+          # Verifica se a versão no package.json corresponde à tag
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "⚠️ Version mismatch: package.json has $PKG_VERSION, tag is $TAG_VERSION"
+            echo "Updating package.json to match tag..."
+            node -e "
+              const fs = require('fs');
+              const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
+              pkg.version = '$TAG_VERSION';
+              fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+            "
+          fi
+
+          echo "✅ Package structure is valid"
+          echo "📦 Version: $TAG_VERSION"
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "## ✅ Published to npm" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Package:** plurima@$VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Install:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "npm install plurima@$VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "[View on npm](https://www.npmjs.com/package/plurima/v/$VERSION)" >> $GITHUB_STEP_SUMMARY
