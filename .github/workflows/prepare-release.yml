@@ -25,14 +25,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Função para comparar versões semânticas (retorna 1 se v1 > v2)
+          version_gt() {
+            test "$(printf '%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" && test "$1" != "$2"
+          }
+
+          # Extrai versão do index.d.ts (@version x.x.x)
+          INDEX_VERSION=$(grep -oP '@version\s+\K[0-9]+\.[0-9]+\.[0-9]+' index.d.ts || echo "0.0.0")
+          echo "Version in index.d.ts: $INDEX_VERSION"
+
+          # Extrai versão do package.json
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          echo "Version in package.json: $PACKAGE_VERSION"
+
+          # Usa a maior versão como base
+          if version_gt "$INDEX_VERSION" "$PACKAGE_VERSION"; then
+            CURRENT_VERSION="$INDEX_VERSION"
+            echo "Using index.d.ts version (higher): $CURRENT_VERSION"
+          else
+            CURRENT_VERSION="$PACKAGE_VERSION"
+            echo "Using package.json version (higher or equal): $CURRENT_VERSION"
+          fi
+
           # Busca a última release publicada (não-draft, não-prerelease)
           LATEST_RELEASE=$(gh release list --limit 10 --json tagName,isDraft,isPrerelease \
             --jq '[.[] | select(.isDraft == false and .isPrerelease == false)] | .[0].tagName // empty' \
             | sed 's/^v//')
 
           if [ -z "$LATEST_RELEASE" ]; then
-            # Nenhuma release existe, usa versão do package.json
-            CURRENT_VERSION=$(node -p "require('./package.json').version")
+            # Nenhuma release existe, usa a maior versão encontrada nos arquivos
             echo "No previous release found. Starting from version: $CURRENT_VERSION"
             echo "should_release=true" >> $GITHUB_OUTPUT
             echo "new_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
@@ -41,6 +62,14 @@ jobs:
           fi
 
           echo "Latest release: v$LATEST_RELEASE"
+
+          # Usa a maior entre a release e a versão nos arquivos
+          if version_gt "$CURRENT_VERSION" "$LATEST_RELEASE"; then
+            BASE_VERSION="$CURRENT_VERSION"
+            echo "Files have higher version than last release, using: $BASE_VERSION"
+          else
+            BASE_VERSION="$LATEST_RELEASE"
+          fi
 
           # Busca commits desde a última release
           if git rev-parse "v$LATEST_RELEASE" >/dev/null 2>&1; then
@@ -81,8 +110,8 @@ jobs:
 
           echo "Bump type: $BUMP_TYPE"
 
-          # Calcula próxima versão
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_RELEASE"
+          # Calcula próxima versão baseado na maior versão (arquivos ou release)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
 
           case $BUMP_TYPE in
             major)
@@ -147,10 +176,12 @@ jobs:
 
           cat release_notes.md
 
-      - name: Update package.json version
+      - name: Update version in files
         if: steps.version.outputs.should_release == 'true' && steps.check_draft.outputs.exists != 'true'
         run: |
           VERSION="${{ steps.version.outputs.new_version }}"
+
+          # Atualiza package.json
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
@@ -158,6 +189,10 @@ jobs:
             fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
           echo "Updated package.json to version $VERSION"
+
+          # Atualiza @version no index.d.ts
+          sed -i "s/@version [0-9]\+\.[0-9]\+\.[0-9]\+/@version $VERSION/" index.d.ts
+          echo "Updated index.d.ts to version $VERSION"
 
       - name: Commit version bump
         if: steps.version.outputs.should_release == 'true' && steps.check_draft.outputs.exists != 'true'
@@ -167,8 +202,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add package.json
-          git commit -m "chore(release): v$VERSION"
+          git add package.json index.d.ts
+
+          # Só faz commit se houver alterações (primeira release pode já ter a versão correta)
+          if git diff --staged --quiet; then
+            echo "No changes to commit (version already correct)"
+          else
+            git commit -m "chore(release): v$VERSION"
+          fi
+
           git tag "v$VERSION"
           git push origin main --tags
 
